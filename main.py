@@ -104,10 +104,22 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         elif tag.get("name"):
             meta_tags[tag["name"]] = tag.get("content", "")
 
+
     semantic_elements = soup.find_all(["main", "article", "section"])
-    semantic_content = "\n\n".join(
-        elem.get_text(separator="\n", strip=True) for elem in semantic_elements
-    )
+    if semantic_elements:
+        semantic_content = "\n".join(
+            elem.get_text(separator="\n", strip=True) for elem in semantic_elements
+        )
+        logger.info("Extracted semantic content from main/article/section.")
+    else:
+        body = soup.body
+        if body:
+            semantic_content = body.get_text(separator="\n", strip=True)
+            logger.info("No semantic elements found. Fallback to <body> content.")
+        else:
+            semantic_content = ""
+            logger.warning("No semantic or body content found.")
+
 
     # Build Tana node
     tana_node = {

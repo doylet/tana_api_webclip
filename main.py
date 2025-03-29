@@ -172,7 +172,8 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         logger.error(f"Tana response: {tana_response.text if 'tana_response' in locals() else 'No response'}")
         raise HTTPException(status_code=502, detail="Failed to post to Tana")
 
-    return {"message": "Content extracted and sent to Tana successfully."}
+    # return {"message": "Content extracted and sent to Tana successfully."}
+    return url
 
 if __name__ == "__main__":
     # uvicorn.run("main:app", host="0.0.0.0", port=10000)

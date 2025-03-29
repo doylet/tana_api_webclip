@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
@@ -33,7 +33,29 @@ app.add_middleware(
 )
 
 @app.post("/parse_and_post")
-def parse_and_post(payload: ParseAndPostPayload):
+async def parse_and_post(request: Request):
+    try:
+        data = await request.json()
+
+        # If Tana sends the body as a stringified JSON, decode it
+        if isinstance(data, str):
+            import json
+            data = json.loads(data)
+
+        url = data["url"]
+        api_token = data["api_token"]
+        target_node_id = data["target_node_id"]
+
+    except Exception as e:
+        logger.error(f"Failed to parse incoming request: {e}")
+        raise HTTPException(status_code=422, detail="Invalid request format")
+
+    # Now pass url, token, and node ID to your existing logic
+    return parse_and_post_internal(url, api_token, target_node_id)
+
+
+def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
+    # your existing fetch → parse → format → post to Tana logic
     logger.info(f"Received request to parse and post: {payload.url}")
 
     # Step 1: Fetch the webpage

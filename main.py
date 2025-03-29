@@ -1,4 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
@@ -16,12 +18,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(
+    title="Tana Webclip API",
+    description="Extracts webpage content and posts to Tana.",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 def clean_text(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
     return re.sub(r"[\r\n]+", " ", text).strip()
+
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
 
 @app.post("/parse_and_post")
 async def parse_and_post(request: Request):

@@ -1,66 +1,75 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 import uvicorn
 import logging
 import json
-import os
 import re
 
-# Setup logging
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+# App definition
 app = FastAPI(
     title="Tana Webclip API",
-    description="Extracts webpage content and posts to Tana.",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    description="Extracts web content and posts it to Tana Input API.",
+    version="1.0.0"
 )
 
+# Redirect / → /docs
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/docs")
+
+# Pydantic model for request body
+class ParseAndPostPayload(BaseModel):
+    url: str
+    api_token: str
+    target_node_id: str
+
+# Clean up HTML text
 def clean_text(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
     return re.sub(r"[\r\n]+", " ", text).strip()
 
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/docs")
-
-@app.post("/parse_and_post")
-async def parse_and_post(request: Request):
+@app.post("/parse_and_post", response_model=Dict[str, str])
+async def parse_and_post(payload: Union[ParseAndPostPayload, str]):
+    """
+    Accepts a URL, API token, and Tana target node ID.
+    Extracts page content and sends it to Tana.
+    """
     try:
-        raw_data = await request.json()
-
-        # Handle stringified JSON body
-        if isinstance(raw_data, str):
+        if isinstance(payload, str):
             logger.info("Detected stringified JSON in body. Parsing...")
-            raw_data = json.loads(raw_data)
+            data = json.loads(payload)
+            payload = ParseAndPostPayload(**data)
+        else:
+            data = payload.dict()
 
-        logger.info(f"Incoming request body:\n{json.dumps(raw_data, indent=2)}")
-
-        url = raw_data["url"]
-        api_token = raw_data["api_token"]
-        target_node_id = raw_data["target_node_id"]
+        logger.info(f"Parsed payload:\n{json.dumps(data, indent=2)}")
 
     except Exception as e:
-        logger.error(f"Failed to parse incoming request: {e}")
+        logger.error(f"Failed to parse request body: {e}")
         raise HTTPException(status_code=422, detail="Invalid request format")
 
-    return parse_and_post_internal(url, api_token, target_node_id)
+    return parse_and_post_internal(
+        payload.url,
+        payload.api_token,
+        payload.target_node_id
+    )
 
 def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
     logger.info(f"Processing URL: {url}")
 
-    # Step 1: Fetch the webpage
+    # Spoof browser headers to bypass bot protections
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -75,20 +84,18 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         "Cache-Control": "max-age=0"
     }
 
-
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        logger.info(f"Successfully fetched {url}")
+        logger.info(f"Fetched {url} successfully")
     except requests.RequestException as e:
         logger.error(f"Failed to fetch URL: {e}")
-        raise HTTPException(status_code=400, detail="Failed to fetch URL.")
+        raise HTTPException(status_code=400, detail="Failed to fetch URL")
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Step 2: Extract data
+    # Extract content
     title = clean_text(soup.title.string if soup.title else url)
-
     og_tags = {}
     meta_tags = {}
     for tag in soup.find_all("meta"):
@@ -102,7 +109,7 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         elem.get_text(separator="\n", strip=True) for elem in semantic_elements
     )
 
-    # Step 3: Construct Tana node
+    # Build Tana node
     tana_node = {
         "name": title,
         "description": clean_text(url),
@@ -116,18 +123,11 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         })
         del og_tags["og:image"]
 
-    if semantic_content:
-        tana_node["children"].append({
-            "name": "Semantic Content",
-            "description": clean_text(semantic_content)
-        })
-    else:
-        tana_node["children"].append({
-            "name": "Semantic Content",
-            "description": "No semantic content found."
-        })
+    tana_node["children"].append({
+        "name": "Semantic Content",
+        "description": clean_text(semantic_content) if semantic_content else "No semantic content found."
+    })
 
-    # Add meta + OG tags
     for key, value in {**meta_tags, **og_tags}.items():
         clean_key = clean_text(key)
         clean_val = clean_text(value)
@@ -137,7 +137,6 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
                 "description": clean_val
             })
 
-    # Final Tana payload
     tana_request = {
         "targetNodeId": target_node_id,
         "nodes": [tana_node]
@@ -145,7 +144,7 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
 
     logger.info(f"Tana request payload:\n{json.dumps(tana_request, indent=2)}")
 
-    # Step 4: Send to Tana
+    # POST to Tana
     try:
         tana_headers = {
             "Authorization": f"Bearer {api_token}",
@@ -158,12 +157,12 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
             json=tana_request
         )
         tana_response.raise_for_status()
-        logger.info(f"Successfully posted to Tana. Status: {tana_response.status_code}")
+        logger.info(f"Posted to Tana successfully: {tana_response.status_code}")
 
     except requests.RequestException as e:
         logger.error(f"Tana API error: {e}")
         logger.error(f"Tana response: {tana_response.text if 'tana_response' in locals() else 'No response'}")
-        raise HTTPException(status_code=502, detail="Failed to post data to Tana.")
+        raise HTTPException(status_code=502, detail="Failed to post to Tana")
 
     return {"message": "Content extracted and sent to Tana successfully."}
 

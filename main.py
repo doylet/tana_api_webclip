@@ -1,62 +1,52 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
 from typing import Optional, Dict, List
+import uvicorn
 import logging
 import json
+import os
+import re
 
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# FastAPI app instance
-from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 
-# Input schema for the /parse_and_post endpoint
-class ParseAndPostPayload(BaseModel):
-    url: str
-    api_token: str
-    target_node_id: str
-
-
-# Middleware to allow CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
-)
+def clean_text(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    return re.sub(r"[\r\n]+", " ", text).strip()
 
 @app.post("/parse_and_post")
 async def parse_and_post(request: Request):
     try:
-        data = await request.json()
+        raw_data = await request.json()
 
-        # If Tana sends the body as a stringified JSON, decode it
-        if isinstance(data, str):
-            import json
-            data = json.loads(data)
+        # Handle stringified JSON body
+        if isinstance(raw_data, str):
+            logger.info("Detected stringified JSON in body. Parsing...")
+            raw_data = json.loads(raw_data)
 
-        url = data["url"]
-        api_token = data["api_token"]
-        target_node_id = data["target_node_id"]
+        logger.info(f"Incoming request body:\n{json.dumps(raw_data, indent=2)}")
+
+        url = raw_data["url"]
+        api_token = raw_data["api_token"]
+        target_node_id = raw_data["target_node_id"]
 
     except Exception as e:
         logger.error(f"Failed to parse incoming request: {e}")
         raise HTTPException(status_code=422, detail="Invalid request format")
 
-    # Now pass url, token, and node ID to your existing logic
     return parse_and_post_internal(url, api_token, target_node_id)
 
-
 def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
-    # your existing fetch → parse → format → post to Tana logic
-    logger.info(f"Received request to parse and post: {payload.url}")
+    logger.info(f"Processing URL: {url}")
 
     # Step 1: Fetch the webpage
     headers = {
@@ -66,18 +56,19 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
             "Chrome/119.0.0.0 Safari/537.36"
         )
     }
+
     try:
-        response = requests.get(payload.url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        logger.info(f"Fetched content from {payload.url} successfully")
+        logger.info(f"Successfully fetched {url}")
     except requests.RequestException as e:
-        logger.error(f"Error fetching URL '{payload.url}': {e}")
-        raise HTTPException(status_code=400, detail="Failed to fetch the given URL.")
+        logger.error(f"Failed to fetch URL: {e}")
+        raise HTTPException(status_code=400, detail="Failed to fetch URL.")
 
     soup = BeautifulSoup(response.text, "html.parser")
 
-    # Step 2: Extract content
-    title = soup.title.string.strip() if soup.title else payload.url
+    # Step 2: Extract data
+    title = clean_text(soup.title.string if soup.title else url)
 
     og_tags = {}
     meta_tags = {}
@@ -92,77 +83,71 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         elem.get_text(separator="\n", strip=True) for elem in semantic_elements
     )
 
-    if not semantic_content:
-        logger.warning(f"No semantic content found in {payload.url}")
-
-    # Step 3: Build Tana payload
-    tana_headers = {
-        "Authorization": f"Bearer {payload.api_token}",
-        "Content-Type": "application/json"
-    }
-
+    # Step 3: Construct Tana node
     tana_node = {
         "name": title,
-        "description": payload.url,
+        "description": clean_text(url),
         "children": []
     }
 
-    # og:image as "Image" field
     if "og:image" in og_tags:
         tana_node["children"].append({
             "name": "Image",
-            "description": og_tags["og:image"]
+            "description": clean_text(og_tags["og:image"])
         })
         del og_tags["og:image"]
 
-    # Semantic content if exists
     if semantic_content:
         tana_node["children"].append({
             "name": "Semantic Content",
-            "description": semantic_content
+            "description": clean_text(semantic_content)
         })
-
-    # Add all meta + OG (excluding og:image)
-    for key, value in {**meta_tags, **og_tags}.items():
+    else:
         tana_node["children"].append({
-            "name": key,
-            "description": value
+            "name": "Semantic Content",
+            "description": "No semantic content found."
         })
 
-    # tana_request = {
-    #     "targetNodeId": payload.target_node_id,
-    #     "nodes": [tana_node]
-    # }
+    # Add meta + OG tags
+    for key, value in {**meta_tags, **og_tags}.items():
+        clean_key = clean_text(key)
+        clean_val = clean_text(value)
+        if clean_key and clean_val:
+            tana_node["children"].append({
+                "name": clean_key,
+                "description": clean_val
+            })
 
+    # Final Tana payload
     tana_request = {
-        "targetNodeId": "INBOX",
+        "targetNodeId": target_node_id,
         "nodes": [tana_node]
     }
 
     logger.info(f"Tana request payload:\n{json.dumps(tana_request, indent=2)}")
-    logger.info(f"Sending data to Tana node {payload.target_node_id}")
-    logger.debug(f"Request headers: {tana_headers}")
-    logger.debug(f"Request body: {json.dumps(tana_request, indent=2)}")
 
-    # Step 4: POST to Tana Input API
+    # Step 4: Send to Tana
     try:
-        logger.info(f"Sending extracted content to Tana node {payload.target_node_id}")
+        tana_headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        }
+
         tana_response = requests.post(
             "https://europe-west1-tagr-prod.cloudfunctions.net/addToNodeV2",
             headers=tana_headers,
             json=tana_request
         )
         tana_response.raise_for_status()
-        logger.info(f"Tana Input API responded with status {tana_response.status_code}")
+        logger.info(f"Successfully posted to Tana. Status: {tana_response.status_code}")
+
     except requests.RequestException as e:
-        if 'tana_response' in locals():
-            logger.error(f"Tana API returned error: {tana_response.status_code} {tana_response.text}")
-            raise HTTPException(status_code=502, detail="Failed to post data to Tana.")
-        logger.debug(f"Tana response body: {tana_response.text if 'tana_response' in locals() else 'No response'}")
+        logger.error(f"Tana API error: {e}")
+        logger.error(f"Tana response: {tana_response.text if 'tana_response' in locals() else 'No response'}")
         raise HTTPException(status_code=502, detail="Failed to post data to Tana.")
 
     return {"message": "Content extracted and sent to Tana successfully."}
 
 if __name__ == "__main__":
-    # uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    # uvicorn.run("main:app", host="0.0.0.0", port=10000)
     app

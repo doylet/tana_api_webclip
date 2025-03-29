@@ -125,18 +125,20 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         del og_tags["og:image"]
 
     if semantic_content:
-        for paragraph in semantic_content.split("\n\n"):
-            clean_paragraph = clean_text(paragraph)
-            if clean_paragraph:
+        for line in semantic_content.splitlines():
+            clean_line = clean_text(line)
+            if clean_line:
                 tana_node["children"].append({
-                    "name": clean_paragraph
+                    "name": clean_line
                 })
-        else:
-            tana_node["children"].append({
-                "name": "No semantic content found"
-            })
+    else:
+        tana_node["children"].append({
+            "name": "No semantic content found"
+        })
 
-    for key, value in {**meta_tags, **og_tags}.items():
+
+    # for key, value in {**meta_tags, **og_tags}.items():
+    for key, value in {**og_tags}.items():
         clean_key = clean_text(key)
         clean_val = clean_text(value)
         if clean_key and clean_val:

@@ -179,7 +179,7 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
             break
         if section.get("name") and ("children" not in section or section["children"]):
             tana_node["children"].append(section)
-
+    logger.info(f"Extracted {len(structured_sections)} sections from the page.")
     # Add meta + OG tags
     for key, value in {**meta_tags, **og_tags}.items():
         k, v = clean_text(key), clean_text(value)

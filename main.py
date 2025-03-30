@@ -177,7 +177,8 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
                 "description": "Only the first 100 sections were included."
             })
             break
-        tana_node["children"].append(section)
+        if section.get("name") and ("children" not in section or section["children"]):
+            tana_node["children"].append(section)
 
     # Add meta + OG tags
     for key, value in {**meta_tags, **og_tags}.items():
@@ -193,9 +194,8 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         "nodes": [tana_node]
     }
 
-    logger.info("Constructed Tana node children:")
-    for child in tana_node["children"]:
-        logger.info(json.dumps(child, indent=2))
+    logger.info("Constructed Tana request:")
+    logger.info(json.dumps(tana_request, indent=2))
 
     try:
         tana_headers = {

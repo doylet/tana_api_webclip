@@ -27,11 +27,6 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Redirect / to /docs
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/docs")
-
 # Pydantic model
 class TanaResponse(BaseModel):
     message: str
@@ -44,12 +39,22 @@ class ParseAndPostPayload(BaseModel):
     target_node_id: str
 
 # Helpers
-def clean_text(text: Optional[str]) -> Optional[str]:
+# def clean_text(text: Optional[str]) -> Optional[str]:
+def clean_whitespace_and_newline_text(text: Optional[str]) -> Optional[str]:
+    """
+    Clean text by removing excessive whitespace and newlines.
+    """
     if not text:
         return None
     return re.sub(r"[\r\n]+", " ", text).strip()
 
 def extract_structured_content(soup: BeautifulSoup) -> List[Dict[str, Union[str, List[Dict[str, str]]]]]:
+    """
+    Extract structured content from the HTML soup.
+    This function looks for headings (h1, h2, h3) and paragraphs (p) or list items (li)
+    and organizes them into a structured format.
+    """
+    
     body = soup.body
     if not body:
         return []
@@ -70,19 +75,33 @@ def extract_structured_content(soup: BeautifulSoup) -> List[Dict[str, Union[str,
             if tag in ["h1", "h2", "h3"]:
                 flush_section()
                 current_section = {
-                    "name": clean_text(element.get_text()),
+                    "name": clean_whitespace_and_newline_text(element.get_text()),
                     "children": []
                 }
             elif tag in ["p", "li"]:
-                text = clean_text(element.get_text())
+                text = clean_whitespace_and_newline_text(element.get_text())
                 if text:
                     current_section["children"].append({"name": text})
 
     flush_section()
     return structured
 
+
+# Redirect / to /docs
+@app.get("/", include_in_schema=False)
+def root():
+    """
+    Redirect root URL to the documentation page.
+    """
+    return RedirectResponse(url="/docs")
+
+
 @app.post("/parse_and_post", response_model=TanaResponse)
 async def parse_and_post(payload: Union[ParseAndPostPayload, str]):
+    """
+    Parse a URL and post the extracted content to Tana.
+    """
+
     try:
         if isinstance(payload, str):
             data = json.loads(payload)
@@ -125,7 +144,7 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         raise HTTPException(status_code=400, detail="Failed to fetch URL")
 
     soup = BeautifulSoup(response.text, "html.parser")
-    title = clean_text(soup.title.string) if soup.title and soup.title.string else None
+    title = clean_whitespace_and_newline_text(soup.title.string) if soup.title and soup.title.string else None
     if not title:
         parsed_url = urlparse(url)
         title = parsed_url.netloc + parsed_url.path
@@ -173,7 +192,7 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
     for i, section in enumerate(structured_sections):
         if i >= MAX_SECTIONS:
             tana_node["children"].append({
-                "name": "⚠️ Content clipped",
+                "name": "Content clipped",
                 "description": "Only the first 100 sections were included."
             })
             break
@@ -182,7 +201,7 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
 
     # Add meta + OG tags
     for key, value in {**meta_tags, **og_tags}.items():
-        k, v = clean_text(key), clean_text(value)
+        k, v = clean_whitespace_and_newline_text(key), clean_whitespace_and_newline_text(value)
         if k and v:
             tana_node["children"].append({
                 "name": k,

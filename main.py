@@ -16,9 +16,13 @@ from base64 import b64encode
 # Logging setup
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    # handlers=[
+    #     logging.FileHandler("tana_webclip.log", mode="a", encoding="utf-8"),
+    # ]
 )
 logger = logging.getLogger(__name__)
+
 
 # App definition
 app = FastAPI(
@@ -47,7 +51,36 @@ class ParseAndPostPayload(BaseModel):
 def clean_text(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
-    return re.sub(r"[\r\n]+", " ", text).strip()
+    text = text.replace("\u00a0", " ")  # non-breaking space to space
+    text = re.sub(r'[\r\n\t]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    if text == '"undefined"' or text.lower() == 'undefined':
+        return None
+    return text
+
+def extract_rich_text(element: Tag) -> Optional[str]:
+    parts = []
+
+    for child in element.descendants:
+        if isinstance(child, Tag):
+            if child.name == "a" and child.get("href"):
+                text = clean_text(child.get_text())
+                href = child.get("href")
+                if text and href:
+                    parts.append(f"[{text}]({href})")
+            # elif child.name == "code":
+            #     code = clean_text(child.get_text())
+            #     if code:
+            #         parts.append(f"`{code}`")
+        else:
+            text = clean_text(str(child))
+            if text:
+                parts.append(text)
+
+    joined = " ".join(parts)
+    return clean_text(joined)
+
 
 def extract_structured_content(soup: BeautifulSoup) -> List[Dict[str, Union[str, List[Dict[str, str]]]]]:
     body = soup.body
@@ -56,7 +89,7 @@ def extract_structured_content(soup: BeautifulSoup) -> List[Dict[str, Union[str,
 
     structured = []
     current_section = {
-        "name": "Intro",
+        "name": "",
         "children": []
     }
 
@@ -67,19 +100,23 @@ def extract_structured_content(soup: BeautifulSoup) -> List[Dict[str, Union[str,
     for element in body.find_all(recursive=True):
         if isinstance(element, Tag):
             tag = element.name.lower()
+            if tag in ["nav", "summary", "details"]:
+                continue
             if tag in ["h1", "h2", "h3"]:
                 flush_section()
                 current_section = {
                     "name": clean_text(element.get_text()),
                     "children": []
                 }
+            
             elif tag in ["p", "li"]:
-                text = clean_text(element.get_text())
-                if text:
-                    current_section["children"].append({"name": text})
+                rich_text = extract_rich_text(element)
+                if rich_text:
+                    current_section["children"].append({"name": rich_text})
 
     flush_section()
     return structured
+
 
 @app.post("/parse_and_post", response_model=TanaResponse)
 async def parse_and_post(payload: Union[ParseAndPostPayload, str]):
@@ -110,12 +147,10 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Cache-Control": "max-age=0"
     }
-
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
@@ -123,12 +158,14 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
     except requests.RequestException as e:
         logger.error(f"Failed to fetch URL: {e}")
         raise HTTPException(status_code=400, detail="Failed to fetch URL")
-
+    
     soup = BeautifulSoup(response.text, "html.parser")
+    logger.info(f"Response content type: {response.headers.get('Content-Type')}")
     title = clean_text(soup.title.string) if soup.title and soup.title.string else None
     if not title:
         parsed_url = urlparse(url)
         title = parsed_url.netloc + parsed_url.path
+    logger.info(f"Extracted title: {title}")
 
     og_tags = {}
     meta_tags = {}
@@ -139,36 +176,14 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
             meta_tags[tag["name"]] = tag.get("content", "")
 
     tana_node = {
-        "name": title or "Untitled Page",
+        "name": title or url,
         "description": None,
         "children": []
     }
 
-    # og:image → file
-    og_image_url = og_tags.pop("og:image", None)
-    if og_image_url:
-        try:
-            img_resp = requests.get(og_image_url, timeout=10)
-            img_resp.raise_for_status()
-            path = urlparse(og_image_url).path
-            filename = path.split("/")[-1] or "image.jpg"
-            mime_type, _ = mimetypes.guess_type(filename)
-            mime_type = mime_type or "image/jpeg"
-            encoded = b64encode(img_resp.content).decode("utf-8")
-            tana_node["children"].append({
-                "name": "Image",
-                "file": {
-                    "name": filename,
-                    "mimeType": mime_type,
-                    "content": encoded
-                }
-            })
-            logger.info(f"Added og:image as file: {filename}")
-        except requests.RequestException as e:
-            logger.warning(f"Failed to download og:image: {e}")
-
     # Structured content extraction
     structured_sections = extract_structured_content(soup)
+    logger.info(f"Extracted {len(structured_sections)} sections from the page.")
     MAX_SECTIONS = 100
     for i, section in enumerate(structured_sections):
         if i >= MAX_SECTIONS:
@@ -179,14 +194,25 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
             break
         if section.get("name") and ("children" not in section or section["children"]):
             tana_node["children"].append(section)
-    logger.info(f"Extracted {len(structured_sections)} sections from the page.")
+    
     # Add meta + OG tags
     for key, value in {**meta_tags, **og_tags}.items():
+        # safe_key = key.replace(":", " - ")
         k, v = clean_text(key), clean_text(value)
         if k and v:
             tana_node["children"].append({
-                "name": k,
-                "description": v
+                "name": "Meta: " + k,
+                "children": [
+                    {
+                        "type": "field",
+                        "attributeId": "nodeID",
+                        "children": [
+                            {
+                                "name": v
+                            }
+                        ]
+                    }
+                ]
             })
 
     tana_request = {
@@ -209,19 +235,33 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         )
         if tana_response.status_code != 200:
             logger.error(f"Tana API returned error: {tana_response.status_code} {tana_response.text}")
-            return JSONResponse(
-                status_code=tana_response.status_code,
-                content=TanaResponse(
-                    message="Tana API returned an error",
-                    status_code=str(tana_response.status_code),
-                    tana_error=tana_response.text
-                ).dict()
-            )
-        
+            raise requests.RequestException(response=tana_response)
+
         logger.info(f"Posted to Tana successfully: {tana_response.status_code}")
     except requests.RequestException as e:
-        logger.error(f"Tana API error: {e}")
-        logger.error(f"Tana response: {tana_response.text if 'tana_response' in locals() else 'No response'}")
+        logger.error("Tana API failed — debugging nodes individually...")
+
+        # Debug each node one at a time
+        for i, child in enumerate(tana_node["children"]):
+            test_node = {
+                "targetNodeId": target_node_id,
+                "nodes": [{
+                    "name": tana_node["name"],
+                    "children": [child]
+                }]
+            }
+            try:
+                test_resp = requests.post(
+                    "https://europe-west1-tagr-prod.cloudfunctions.net/addToNodeV2",
+                    headers=tana_headers,
+                    json=test_node
+                )
+                test_resp.raise_for_status()
+                logger.info(f"Node {i} succeeded")
+            except requests.RequestException as single_error:
+                logger.error(f"Node {i} failed: {json.dumps(child, indent=2)}")
+                logger.error(f"Tana response: {single_error.response.text if single_error.response else 'No response'}")
+    
         raise HTTPException(status_code=502, detail="Failed to post to Tana")
 
     return TanaResponse(

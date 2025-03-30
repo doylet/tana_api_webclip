@@ -38,7 +38,6 @@ class TanaResponse(BaseModel):
     status_code: str
     tana_error: Optional[str] = None
 
-
 class ParseAndPostPayload(BaseModel):
     url: str
     api_token: str
@@ -126,7 +125,10 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         raise HTTPException(status_code=400, detail="Failed to fetch URL")
 
     soup = BeautifulSoup(response.text, "html.parser")
-    title = clean_text(soup.title.string if soup.title else url)
+    title = clean_text(soup.title.string) if soup.title and soup.title.string else None
+    if not title:
+        parsed_url = urlparse(url)
+        title = parsed_url.netloc + parsed_url.path
 
     og_tags = {}
     meta_tags = {}
@@ -137,8 +139,8 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
             meta_tags[tag["name"]] = tag.get("content", "")
 
     tana_node = {
-        "name": title,
-        "description": clean_text(url),
+        "name": title or "Untitled Page",
+        "description": None,
         "children": []
     }
 
@@ -191,6 +193,10 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         "nodes": [tana_node]
     }
 
+    logger.info("Constructed Tana node children:")
+    for child in tana_node["children"]:
+        logger.info(json.dumps(child, indent=2))
+
     try:
         tana_headers = {
             "Authorization": f"Bearer {api_token}",
@@ -203,19 +209,11 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
         )
         if tana_response.status_code != 200:
             logger.error(f"Tana API returned error: {tana_response.status_code} {tana_response.text}")
-            return {
-                "message": "Tana API returned an error",
-                "status_code": tana_response.status_code,
-                "tana_response": tana_response.json()
-            }
-        if tana_response.status_code != 200:
-            logger.error(f"Tana API returned error: {tana_response.status_code} {tana_response.text}")
             return TanaResponse(
                 message="Tana API returned an error",
                 status_code=str(tana_response.status_code),
                 tana_error=tana_response.text
             )
-
         logger.info(f"Posted to Tana successfully: {tana_response.status_code}")
     except requests.RequestException as e:
         logger.error(f"Tana API error: {e}")

@@ -209,14 +209,14 @@ def parse_and_post_internal(url: str, api_token: str, target_node_id: str):
                 "tana_response": tana_response.json()
             }
         if tana_response.status_code != 200:
-        logger.error(f"Tana API returned error: {tana_response.status_code} {tana_response.text}")
-        return TanaResponse(
-            message="Tana API returned an error",
-            status_code=str(tana_response.status_code),
-            tana_error=tana_response.text
-        )
+            logger.error(f"Tana API returned error: {tana_response.status_code} {tana_response.text}")
+            return TanaResponse(
+                message="Tana API returned an error",
+                status_code=str(tana_response.status_code),
+                tana_error=tana_response.text
+            )
 
-    logger.info(f"Posted to Tana successfully: {tana_response.status_code}")
+        logger.info(f"Posted to Tana successfully: {tana_response.status_code}")
     except requests.RequestException as e:
         logger.error(f"Tana API error: {e}")
         logger.error(f"Tana response: {tana_response.text if 'tana_response' in locals() else 'No response'}")
